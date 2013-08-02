@@ -2,6 +2,7 @@ require 'rubygems'
 require 'nokogiri'
 require 'open-uri'
 require 'optparse'
+require 'benchmark'
 require 'zip/zip'
 
 class JFCrawler
@@ -41,17 +42,17 @@ class JFCrawler
       rows = page.css('div.page div table#threadslist.tborder tbody tr')
 
       if rows[1..-1].nil?
-        puts url
-        exit
-      end
-      rows[1..-1].each do |row|
-        tds = row.css('> td')
-        link = tds[2].css("a[id*='thread_title_']").first
-        if link.nil?
-          nil
-        else
-          link['href'] =~ /.*t=([0-9]+).*/
-          yield $1.to_i, link, to_number(tds[4].css('>a')[0]), to_number(tds[5])
+        puts "ERROR: #{url}"
+      else
+        rows[1..-1].each do |row|
+          tds = row.css('> td')
+          link = tds[2].css("a[id*='thread_title_']").first
+          if link.nil?
+            nil
+          else
+            link['href'] =~ /.*t=([0-9]+).*/
+            yield $1.to_i, link, to_number(tds[4].css('>a')[0]), to_number(tds[5])
+          end
         end
       end
 
@@ -180,28 +181,31 @@ end
 
 puts "Crawling #{ARGV.first} #{options[:forum_id]} (#{options[:start_page]} - #{options[:pages]})"
 threads = []
-crawler.parse_forums do |id, link, topics|
-  next if !options[:forum_id].nil? && id!=options[:forum_id]
-  threads << Thread.new do
-    Dir.mkdir("f_#{id}") unless Dir.exists?("f_#{id}")
-    crawler.parse_topics( link, options[:start_page], options[:pages] ) do |topic_id, link, replies, hits|
-      puts "Topic #{topic_id} #{replies} #{hits}"
-      f = File.new "f_#{id}/t_#{topic_id}.zip", "w"
-      Zip::ZipOutputStream.open(f.path) do |z|
-        crawler.parse_posts( link ) do |post_id, author, date_time, title, content|
-          z.put_next_entry("p_#{post_id}.txt")
-          z.write "{\n   author='#{author},'\n"
-          z.write "   time='#{date_time.xmlschema}',\n"
-          z.write "   title='#{title}',\n"
-          z.write "<<<<\n"
-          z.write content
-          z.write "\n>>>>\n}"
+Benchmark.bm do |x|
+  x.report do
+    crawler.parse_forums do |id, link, topics|
+      next if !options[:forum_id].nil? && id!=options[:forum_id]
+      threads << Thread.new do
+        Dir.mkdir("f_#{id}") unless Dir.exists?("f_#{id}")
+        crawler.parse_topics( link, options[:start_page], options[:pages] ) do |topic_id, link, replies, hits|
+          puts "Topic #{topic_id} #{replies} #{hits}"
+          f = File.new "f_#{id}/t_#{topic_id}.zip", "w"
+          Zip::ZipOutputStream.open(f.path) do |z|
+            crawler.parse_posts( link ) do |post_id, author, date_time, title, content|
+              z.put_next_entry("p_#{post_id}.txt")
+              z.write "{\n   author='#{author},'\n"
+              z.write "   time='#{date_time.xmlschema}',\n"
+              z.write "   title='#{title}',\n"
+              z.write "<<<<\n"
+              z.write content
+              z.write "\n>>>>\n}"
+            end
+          end
         end
       end
     end
+    threads.each do |t|
+      t.join
+    end
   end
 end
-threads.each do |t|
-  t.join
-end
-
