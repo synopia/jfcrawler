@@ -1,21 +1,60 @@
 require 'rubygems'
 require 'nokogiri'
 require 'open-uri'
+require 'thread'
+
+TOPICS_PER_PAGE = 20
+
+module Statistic
+  class ::Numeric
+    def to(unit, places=1)
+      units = { :b => 1,
+                :kb => 1024**1,
+                :mb => 1024**2,
+                :gb => 1024**3,
+                :tb => 1024**4,
+                :pb => 1024**5,
+                :eb => 1024**6}
+      unitval = units[unit.to_s.downcase.to_sym]
+      "#{sprintf("%.#{places}f", self / unitval)} #{unit.to_s.upcase}"
+    end # to
+  end
+
+  MUTEX = Mutex.new
+  def self.add_network(amount)
+    MUTEX.synchronize do
+      @total_network ||= 0
+      @total_network += amount
+    end
+  end
+
+  def self.network_info
+    return '' if @start_time.nil?
+    MUTEX.synchronize do
+      time_diff = Time.now.to_f - @start_time
+      "#{(@total_network.to_f/time_diff.to_f).to(:MB)}/s, total: #{@total_network.to_f.to(:MB)}"
+    end
+  end
+
+  def self.start
+    @start_time = Time.now.to_f
+  end
+end
 
 class JFCrawler
-  HEADER_HASH = {"User-Agent"=>"Ruby/#{RUBY_VERSION}"}
+  HEADER_HASH = {'User-Agent' =>"Ruby/#{RUBY_VERSION}"}
 
   def initialize(url, opts={})
     @url = url
     @prefix_url = opts[:prefix]
     @use_cache = opts[:cache]==:on
     @time_to_wait = opts[:wait]
-    @today = Date.today.strftime("%d.%m.%Y")
-    @yesterday = Date.today.prev_day.strftime("%d.%m.%Y")
+    @today = Date.today.strftime('%d.%m.%Y')
+    @yesterday = Date.today.prev_day.strftime('%d.%m.%Y')
   end
 
-  def parse_forums( &block )
-    page = open_url( @url )
+  def parse_forums( page=nil, &block )
+    page ||= open_url( @url )
 
     rows = page.css("div.page div table.tborder tbody[id*='collapseobj_forumbit_'] tr")
 
@@ -32,17 +71,23 @@ class JFCrawler
   end
 
   def parse_topics(link, start_page, pages, &block)
-    url = "#{link['href']}?page=#{start_page+1}"
+    sep = '&'
+    sep = '?' if link['href'].end_with? '/'
+    url = "#{link['href']}#{sep}page=#{start_page+1}"
+    is_start_page = start_page==0
     begin
       page = open_url(url)
-      rows = page.css('div.page div table#threadslist.tborder tbody tr')
 
-      unless rows[1..-1].nil?
-        rows[1..-1].each_with_index do |row, i|
+      rows = page.css('div.page div table#threadslist.tborder tbody tr')
+      start = 1
+      if rows.size-1>TOPICS_PER_PAGE && !is_start_page
+        start += rows.size-1-TOPICS_PER_PAGE
+      end
+      unless rows[start..-1].nil?
+        rows[start..-1].each_with_index do |row, i|
           tds = row.css('> td')
           link = tds[2].css("a[id*='thread_title_']").first
           unless link.nil?
-            id = pages*20 + i+1
             id = $1.to_i if link['href'] =~ /.*t=([0-9]+).*/
             id = $1.to_i if link['href'] =~ /.*\/([0-9]+)\-.*/
             yield id, link, to_number(tds[4].css('>a')[0]), to_number(tds[5])
@@ -50,6 +95,7 @@ class JFCrawler
         end
       end
       url = next_page page
+      is_start_page = false
       pages -= 1
     end until url.nil? || pages==0
   end
@@ -84,13 +130,13 @@ class JFCrawler
   def open_url( url )
     local_filename = get_filename(url)
     if @use_cache && File.exists?(local_filename)
-      content = File.open(local_filename)
+      content = File.open(local_filename).read
     else
-      url = "#{@prefix}#{@url}/#{url}"
+      url = "#{@prefix}#{@url+'/' unless url.start_with? 'http://'}#{url}"
       begin
         content = open(url, HEADER_HASH).read
       rescue Exception=>e
-        puts "Error #{e}"
+        puts "Error #{url}\n#{e}"
         sleep 5
       else
         if @use_cache
@@ -102,7 +148,8 @@ class JFCrawler
         sleep @time_to_wait
       end
     end
-    Nokogiri::HTML(content)
+    Statistic.add_network(content.size)
+    Nokogiri::HTML::Document.parse(content)
   end
 
   def get_filename( url )

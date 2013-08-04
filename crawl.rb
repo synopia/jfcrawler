@@ -8,10 +8,8 @@ require 'pp'
 require "curses"
 require './jfcrawler'
 require './workers'
+require './display'
 
-include Curses
-
-TOPICS_PER_PAGE = 20
 
 options = {}
 
@@ -23,8 +21,8 @@ optparse = OptionParser.new do |opts|
   opts.on( '-s', '--list', 'Lists all forums and their id') do
     options[:list] = true
   end
-  opts.on( '-f', '--forum FORUM_ID', Integer, 'Select forum') do |forum_id|
-    options[:forum_id] = forum_id
+  opts.on( '-f', '--forum id1,id2,id3,..', Array, 'Select forum') do |forum_ids|
+    options[:forum_ids] = forum_ids
   end
   options[:threads] = 1
   opts.on( '-t', '--threads THREAD', Integer, 'Number of threads to use') do |threads|
@@ -35,8 +33,12 @@ optparse = OptionParser.new do |opts|
     options[:wait] = time
   end
   options[:cache] = :off
-  opts.on( '-c', '--cache OPT', [:on, :off], 'Enable/disable using the download cache') do |cache|
-    options[:cache] = cache
+  opts.on( '-c', '--cache', 'Enable the download cache') do
+    options[:cache] = :on
+  end
+  options[:display] = :curse
+  opts.on( '-r', '--nocurse', 'Disable curse gui') do
+    options[:display] = :simple
   end
   opts.on( '-h', '--help', 'Display this screen' ) do
     puts opts
@@ -65,30 +67,30 @@ if options[:cache] && !Dir.exists?('cache')
 end
 if options[:list]
   crawler.parse_forums do |id, link, topics|
-    puts "#{id}\t#{link.child.text}"
+    puts "#{id}\t#{link.child.text} (#{topics})"
   end
   exit
 end
 
-init_screen
 
 begin
-  setpos(0,0)
-  addstr "Crawling #{ARGV.first} #{options[:forum_id]}"
-  refresh
+  display = options[:display]==:curse && CursesDisplay.available? ? CursesDisplay.new : SimpleDisplay.new
+  display.start 'Getting forums... '
   tasks = []
-  total_topic_pages = 0
+  total_topics = 0
+  Statistic.start
   crawler.parse_forums do |id, link, topics|
-    next if !options[:forum_id].nil? && id!=options[:forum_id]
-    pages = topics/TOPICS_PER_PAGE + 1
-    task = Task.new(id, link, 0, pages, true)
+    next if !options[:forum_ids].nil? && !options[:forum_ids].include?(id.to_s)
+    display.info 0, link.child.text
+    task = Task.new(id, link, 0, topics, true)
     tasks << task
-    total_topic_pages += pages
+    total_topics += topics
   end
-  topics_per_thread = total_topic_pages / options[:threads] + 1
-  setpos(0,0)
-  addstr "Crawling #{ARGV.first} #{options[:forum_id]} (total topic pages=#{total_topic_pages}, topics_per_thread=#{topics_per_thread})"
-  refresh
+  topics_per_thread = total_topics / options[:threads] + 1
+  topics_per_thread = TOPICS_PER_PAGE if topics_per_thread<TOPICS_PER_PAGE
+
+  display.start "#{tasks.size} forums found with a total of #{total_topics} topics."
+
   threads = []
   options[:threads].times do |i|
     thread_tasks = []
@@ -106,31 +108,32 @@ begin
       end
     end
     threads << Thread.new do
-      total_topics = thread_tasks.inject(0){|sum, t| sum+(t.limit*TOPICS_PER_PAGE)}
+      topics = thread_tasks.inject(0){|sum, t| sum+t.limit}
       count = 0.0
       thread_tasks.each do |task|
-        setpos(i+2, 14)
-        addstr "#{task}                                 "
-        refresh
-        task.do_work(crawler) do
+        task.do_work(i, crawler, display) do
+          display.info i, task.to_s
           count += 1.0
-          progress = count / total_topics
-          progress_bar = (progress * 10).to_i
-          setpos(i+2, 0)
-          addstr "[#{'*'*progress_bar}#{' '*(10-progress_bar)}]  "
-          refresh
+          progress = count / topics
+          display.progress i, progress
         end
-        setpos(i+2, 14)
-        addstr 'done'
-        refresh
       end
+      display.progress i, 1
+      display.status i, 'done'
     end
   end
+  display.start "Scanning #{total_topics} topics with #{options[:threads]} threads..."
+
   threads.each do |t|
     t.join
   end
+  display.render
+
 rescue Exception=>e
-    puts e
+  display.finish 'bye'
+  puts e
 ensure
-  close_screen
+  #display.finish 'bye'
 end
+
+puts Statistic.network_info
